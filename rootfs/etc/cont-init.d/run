@@ -1,0 +1,163 @@
+#!/usr/bin/with-contenv bash
+
+DB_NAME=${DB_NAME:-}
+DB_USER=${DB_USER:-}
+DB_PASS=${DB_PASS:-}
+
+DB_BACKUP_USER=${DB_BACKUP_USER:-}
+DB_BACKUP_PASS=${DB_BACKUP_PASS:-}
+
+DB_REMOTE_ROOT_NAME=${DB_REMOTE_ROOT_NAME:-}
+DB_REMOTE_ROOT_PASS=${DB_REMOTE_ROOT_PASS:-}
+DB_REMOTE_ROOT_HOST=${DB_REMOTE_ROOT_HOST:-"172.17.42.1"}
+
+MYSQL_CHARSET=${MYSQL_CHARSET:-"utf8"}
+MYSQL_COLLATION=${MYSQL_COLLATION:-"utf8_unicode_ci"}
+
+create_confd_dir() {
+  mkdir -p /etc/mysql/conf.d
+  chmod -R 0755 ${MYSQL_DATA_DIR}
+  chown -R root:root /etc/mysql/conf.d
+}
+
+create_data_dir() {
+  mkdir -p ${MYSQL_DATA_DIR}
+  chmod -R 0700 ${MYSQL_DATA_DIR}
+  chown -R ${MYSQL_USER}:${MYSQL_USER} ${MYSQL_DATA_DIR}
+}
+
+create_log_dir() {
+  mkdir -p ${MYSQL_LOG_DIR}
+  chmod -R 0755 ${MYSQL_LOG_DIR}
+  chown -R ${MYSQL_USER}:${MYSQL_USER} ${MYSQL_LOG_DIR}
+}
+
+create_run_dir() {
+  mkdir -p ${MYSQL_RUN_DIR}
+  chmod -R 0755 ${MYSQL_RUN_DIR}
+  chown -R ${MYSQL_USER}:root ${MYSQL_RUN_DIR}
+}
+
+apply_configuration_fixes() {
+  cat >> /etc/mysql/my.cnf <<EOF
+!includedir /etc/mysql/conf.d
+EOF
+
+  # disable log
+  cat > /etc/mysql/conf.d/mysql-disable-logs.cnf <<EOF
+[mysqld]
+general_log = 0
+EOF
+  
+  # Fixing StartUp Porblems with some DNS Situations and Speeds up the stuff
+  # http://www.percona.com/blog/2008/05/31/dns-achilles-heel-mysql-installation/
+  cat > /etc/mysql/conf.d/mysql-skip-name-resolv.cnf <<EOF
+[mysqld]
+skip_name_resolve
+EOF
+}
+
+initialize_mysql_database() {
+  # initialize MySQL data directory
+  if [ ! -d ${MYSQL_DATA_DIR}/mysql ]; then
+    echo "Installing database..."
+    mysql_install_db --user=mysql >/dev/null 2>&1
+
+    # start mysql server
+    echo "Starting MySQL server..."
+    /usr/bin/mysqld_safe >/dev/null 2>&1 &
+
+    # wait for mysql server to start (max 30 seconds)
+    timeout=30
+    echo -n "Waiting for database server to accept connections"
+    while ! /usr/bin/mysqladmin -u root status >/dev/null 2>&1
+    do
+      timeout=$(($timeout - 1))
+      if [ $timeout -eq 0 ]; then
+        echo -e "\nCould not connect to database server. Aborting..."
+        exit 1
+      fi
+      echo -n "."
+      sleep 1
+    done
+    echo
+
+    ## Drop default test database
+    echo "Drop default test database..."
+    mysql -uroot -e "DROP DATABASE test;" 
+    ## create a localhost only, debian-sys-maint user
+    ## the debian-sys-maint is used while creating users and database
+    ## as well as to shut down or starting up the mysql server via mysqladmin
+
+    if [ -n "${DB_REMOTE_ROOT_NAME}" -a -n "${DB_REMOTE_ROOT_HOST}" ]; then
+      echo "Creating remote user \"${DB_REMOTE_ROOT_NAME}\" with root privileges..."
+      mysql -uroot \
+      -e "GRANT ALL PRIVILEGES ON *.* TO '${DB_REMOTE_ROOT_NAME}'@'${DB_REMOTE_ROOT_HOST}' IDENTIFIED BY '${DB_REMOTE_ROOT_PASS}' WITH GRANT OPTION; FLUSH PRIVILEGES;"
+    fi
+
+    /usr/bin/mysqladmin --defaults-file=/etc/mysql/my.cnf shutdown
+  fi
+}
+
+create_users_and_databases() {
+  # create new user / database
+  if [ -n "${DB_USER}" -o -n "${DB_NAME}" ]; then
+    /usr/bin/mysqld_safe >/dev/null 2>&1 &
+
+    # wait for mysql server to start (max 30 seconds)
+    timeout=30
+    while ! /usr/bin/mysqladmin -u root status >/dev/null 2>&1
+    do
+      timeout=$(($timeout - 1))
+      if [ $timeout -eq 0 ]; then
+        echo "Could not connect to mysql server. Aborting..."
+        exit 1
+      fi
+      sleep 1
+    done
+
+    if [ -n "${DB_NAME}" ]; then
+      for db in $(echo "${DB_NAME}"|awk -F',' '{for (i = 1 ; i <= NF ; i++) print $i}'); do
+        echo "Creating database \"$db\"..."
+        mysql --defaults-file=/etc/mysql/my.cnf \
+          -e "CREATE DATABASE IF NOT EXISTS \`$db\` DEFAULT CHARACTER SET \`$MYSQL_CHARSET\` COLLATE \`$MYSQL_COLLATION\`;"
+          if [ -n "${DB_USER}" ]; then
+            echo "Granting access to database \"$db\" for user \"${DB_USER}\"..."
+            mysql --defaults-file=/etc/mysql/my.cnf \
+            -e "GRANT ALL PRIVILEGES ON \`$db\`.* TO '${DB_USER}' IDENTIFIED BY '${DB_PASS}';"
+          fi
+        done
+    fi
+  
+    # create backup user
+    if [ -n "${DB_BACKUP_USER}" -o -n "${DB_BACKUP_PASS}" ]; then
+      echo "Granting access to all database for backup user \"${DB_BACKUP_USER}\"..."
+      mysql --defaults-file=/etc/mysql/my.cnf \
+      -e "GRANT SELECT, RELOAD, FILE, SUPER, LOCK TABLES, SHOW VIEW ON *.* TO '${DB_BACKUP_USER}' IDENTIFIED BY '${DB_BACKUP_PASS}' WITH MAX_QUERIES_PER_HOUR 0 MAX_CONNECTIONS_PER_HOUR 0 MAX_UPDATES_PER_HOUR 0 MAX_USER_CONNECTIONS 0 ;"
+    fi
+
+    /usr/bin/mysqladmin --defaults-file=/etc/mysql/my.cnf shutdown 
+  fi  
+}
+
+listen_on_all_interfaces() {
+  cat > /etc/mysql/conf.d/mysql-listen.cnf <<EOF
+[mysqld]
+bind = 0.0.0.0
+EOF
+}
+
+create_confd_dir
+create_data_dir
+create_run_dir
+create_log_dir
+
+_file_marker=".db-configured"
+# Init mysql
+if [ ! -f "$_file_marker" ]; then  
+  touch "$_file_marker"  
+  apply_configuration_fixes
+  initialize_mysql_database
+  create_users_and_databases
+  listen_on_all_interfaces
+fi
