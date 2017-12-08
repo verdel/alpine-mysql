@@ -10,13 +10,15 @@ ENV MYSQL_USER=mysql \
 RUN apk --update add \
     bash \
     mysql \
-    mysql-client \ 
+    mysql-client \
     # Clean up
     && rm -rf \
     /usr/share/man \
     /tmp/* \
     /var/cache/apk/* \
     ${MYSQL_DATA_DIR}
+
+RUN sed -i '/\[mysqld\]/a max_packet_size = 32M' /etc/mysql/my.cnf
 
 # Copy init scripts
 COPY rootfs /
