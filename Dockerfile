@@ -18,7 +18,7 @@ RUN apk --update add \
     /var/cache/apk/* \
     ${MYSQL_DATA_DIR}
 
-RUN sed -i '/\[mysqld\]/a max_packet_size = 32M' /etc/mysql/my.cnf
+RUN sed -i '/\[mysqld\]/a max_allowed_packet = 32M' /etc/mysql/my.cnf
 
 # Copy init scripts
 COPY rootfs /
