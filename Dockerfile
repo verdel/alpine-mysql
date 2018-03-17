@@ -9,8 +9,8 @@ ENV MYSQL_USER=mysql \
 # Install mysql-server and mysql-client
 RUN apk --update add \
     bash \
-    mysql \
-    mysql-client \
+    mysql@edge \
+    mysql-client@edge \
     # Clean up
     && rm -rf \
     /usr/share/man \
